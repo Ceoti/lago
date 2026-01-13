@@ -1,0 +1,99 @@
+services:
+
+  timescaledb:
+    image: timescale/timescaledb-ha:pg14-latest
+    container_name: timescaledb
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/home/postgres/pgdata/data          # ⬅️ 이 이미지의 실제 데이터 경로
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/home/postgres/pgdata/data  # ⬅️ 여기에 마운트해야 영속화됨
+      # - ./initdb:/docker-entrypoint-initdb.d:ro   # (선택) 최초 1회만 사용하고 빼두기
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.2
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  finbert:
+    build:
+      context: ./Finbert
+      dockerfile: Dockerfile
+    container_name: finbert-service
+    ports:
+      - "5000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  chart-analysis: # New service for chart analysis
+    build:
+      context: ./chart_analysis
+      dockerfile: Dockerfile
+    container_name: chart-analysis-service
+    ports:
+      - "5001:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"] # Updated to internal port 8000
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: ./BE
+      dockerfile: Dockerfile
+    container_name: spring-backend
+    ports:
+      - "8081:9000"
+    env_file:
+      - .env
+    environment:
+      # Spring 프로파일 설정 (EC2 배포시 prod로 변경)
+      - SPRING_PROFILES_ACTIVE=${SPRING_PROFILES_ACTIVE:-dev}
+      
+      # 데이터베이스 연결 (EC2 실제 DB로 연결)
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL}
+      - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME}
+      - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD}
+      
+      # Redis 연결 (Docker Compose 환경에서는 로컬 Redis 컨테이너 사용)
+      - SPRING_REDIS_HOST=redis
+      - SPRING_REDIS_PORT=6379
+      - REDIS_STREAM_KEY=orders-stream
+      - REDIS_STREAM_CONSUMER_GROUP=lago_group
+      - REDIS_STREAM_CONSUMER_NAME=lago_consumer
+      
+      # AI 서비스 연결 - FinBERT 서비스 연결 수정  
+      - FINBERT_URL=http://finbert-service:8000
+      - FINBERT_SERVER_HOST=http://finbert-service:8000
+      - CHART_ANALYSIS_URL=http://chart-analysis-service:8000
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      # finbert:
+      #   condition: service_healthy  # 임시 비활성화
+    restart: unless-stopped
+
+volumes:
+  timescale_data:
